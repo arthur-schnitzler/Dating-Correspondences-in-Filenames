@@ -4,15 +4,20 @@ Ein kleines Werkzeug, um Scans oder Fotos von Briefen schnell durchzusehen und
 Datum, Sender und Empfänger direkt in den Dateinamen zu schreiben:
 
 ```
-d1899-12-31_s2121_r10815_p1.jpg
+d1899-12-31_s2121_e10815_p1.jpg
 ```
 
 | Teil          | Bedeutung                                   |
 |---------------|---------------------------------------------|
-| `d1899-12-31` | **d**atum: 31. Dezember 1899                |
-| `s2121`       | **s**ender: Nr. 2121 (Arthur Schnitzler)    |
-| `r10815`      | **r**eceiver: Nr. 10815 (Hermann Bahr)      |
+| `d1899-12-31` | **D**atum: 31. Dezember 1899                |
+| `s2121`       | **S**ender: Nr. 2121 (Arthur Schnitzler)    |
+| `e10815`      | **E**mpfänger: Nr. 10815 (Hermann Bahr)     |
 | `p1`          | **p**age: Seite 1                           |
+
+Abschriften bekommen zusätzlich `_abschrift` vor der Seitenzahl
+(`d1899-12-31_s2121_e10815_abschrift_p1.jpg`). Bilder, die kein Brief sind,
+werden nicht datiert und behalten ihren Namen mit dem Zusatz `_sonstiges`
+(`IMG_0003_sonstiges.jpg`).
 
 Die Nummern sind Personen-IDs, z. B. aus der [PMB](https://pmb.acdh.oeaw.ac.at/).
 
@@ -67,8 +72,8 @@ Anklicken angeboten, ein kopierter Pfad lässt sich oben einfügen. Später wech
 man den Ordner links oben über **wechseln…**.
 
 Links erscheinen alle Ordner, in denen noch unbenannte Bilder liegen
-(`jpg`, `png`, `tif`, `gif`, `webp`). Bereits benannte Bilder werden nicht mehr
-angezeigt; man kann die Arbeit also jederzeit unterbrechen und später fortsetzen.
+(`jpg`, `png`, `tif`, `gif`, `webp`). Bereits benannte und als *sonstiges*
+abgelegte Bilder werden nicht mehr angezeigt; man kann die Arbeit also jederzeit unterbrechen und später fortsetzen.
 
 ## Arbeiten
 
@@ -85,6 +90,25 @@ Man muss nirgends hinklicken, um zu tippen: Ziffern landen immer im Datumsfeld,
 auch nach einem Klick ins Bild oder auf einen Knopf. Ist ein Ordner fertig,
 führt **Enter** gleich in den nächsten.
 
+### Vorschlag aus dem Ordner
+
+Liegt im Ordner neben den Bildern eine Datei, deren Name schon eine Datierung
+enthält – etwa eine Katalogdatei `DLA_d1926-12-08_s14886_e2121.txt` –, trägt das
+Tool Datum, Sender und Empfänger beim Öffnen des Ordners ein. Oben steht dann
+grün **✓ Vorschlag aus DLA_d1926-12-08_s14886_e2121.txt**; es genügt **Enter**
+(bei mehreren Seiten für jede Seite).
+
+- Das gilt nur, wenn es im Ordner genau **eine** solche Datierung gibt. Bei zwei
+  verschiedenen Briefen wird nichts vorgeschlagen. Zwei Dateien mit derselben
+  Datierung (`…_e2121.txt`, `…_e2121_2.txt`) zählen als ein Vorschlag.
+- Erkannt wird die Schreibweise, die das Tool selbst verwendet, irgendwo im
+  Dateinamen: `d1926-12-08`, auch mit `u`, `X`, Zeitraum, `_s…`, `_e…` und
+  `_abschrift`. Bilder zählen nicht, nur andere Dateien.
+- Weicht man ab, wird der Hinweis grau; **wieder eintragen** stellt den Vorschlag
+  wieder her.
+- Ein vorgeschlagenes Datum gilt auch außerhalb des erlaubten Zeitraums
+  (`YEAR_MIN`, `YEAR_MAX`) – der fängt nur Tippfehler ab.
+
 ### Tastatur
 
 | Taste     | Wirkung                                              |
@@ -93,6 +117,8 @@ führt **Enter** gleich in den nächsten.
 | **↓** **↑** | nächstes / vorheriges Bild, ohne umzubenennen      |
 | **S**     | Sender und Empfänger tauschen                        |
 | **U**     | Datum als unsicher markieren (und wieder zurück)     |
+| **A**     | Brief als Abschrift markieren (und wieder zurück)    |
+| **O**     | Bild als *sonstiges* ablegen und weiter              |
 | **R**     | Ansicht um 90° drehen                                |
 
 Die Buchstaben gelten im Datumsfeld; in den Feldern für Sender und Empfänger
@@ -139,14 +165,33 @@ sind sie normale Zeichen.
 - Neben jedem Feld stehen Knöpfe zur Schnellauswahl: **2121 Schnitzler** und die
   Ordner-Nummer. Ein Klick trägt die Nummer ein oder wieder aus.
 - **Mehrere** Personen: Nummern mit Leerzeichen oder Komma getrennt eintippen.
-  Im Dateinamen stehen sie mit Bindestrich: `d1899-12-31_s2121_r10815-2167_p1.jpg`.
+  Im Dateinamen stehen sie mit Bindestrich: `d1899-12-31_s2121_e10815-2167_p1.jpg`.
 - Ein leeres Feld lässt den Teil weg (`d1899-12-31_s2121_p1.jpg`).
 - Die Eingaben bleiben für die folgenden Bilder des Ordners stehen.
+
+### Abschrift
+
+Das Häkchen **Abschrift** (oder die Taste **A**) hängt `_abschrift` vor die
+Seitenzahl: `d1899-12-31_s2121_e10815_abschrift_p1.jpg`. Das geht auch bei
+undatierten Briefen (`undatiert_s2121_e10815_abschrift_p1.jpg`). Abschrift und
+Original desselben Briefs werden getrennt gezählt, beide beginnen bei `_p1`.
+
+Wie **unsicher** gilt das Häkchen für einen Brief: Es bleibt für die folgenden
+Seiten stehen und fällt weg, sobald man ein neues Datum (bzw. eine neue
+Brief-Nr.) eintippt. Hakt man es vor dem Datum an, bleibt es stehen.
+
+### Sonstiges
+
+Für Bilder, die kein Brief sind (Umschläge, Visitenkarten, Fotos …): Der Knopf
+**Sonstiges** oder die Taste **O** hängt nur `_sonstiges` an den bisherigen
+Namen und geht zum nächsten Bild – `IMG_0003.jpg` wird zu
+`IMG_0003_sonstiges.jpg`. Datum, Sender und Empfänger spielen dabei keine Rolle.
+Solche Bilder gelten danach als erledigt; **Rückgängig** nimmt auch das zurück.
 
 ### Seitenzahlen
 
 Jeder Dateiname endet mit einer Seitenzahl. Das erste Bild bekommt `_p1`; gibt es
-den Namen schon, wird hochgezählt: `d1899-12-31_s2121_r10815_p2.jpg`, `…_p3.jpg`.
+den Namen schon, wird hochgezählt: `d1899-12-31_s2121_e10815_p2.jpg`, `…_p3.jpg`.
 Zwei verschiedene Briefe gleichen Datums zwischen denselben Personen werden
 ebenfalls fortlaufend gezählt.
 
@@ -187,6 +232,8 @@ YEAR_MIN, YEAR_MAX = 1879, 1931      # erlaubter Zeitraum (fängt Tippfehler ab)
 DEFAULT_DATE = "1912-05-15"          # Datum, das beim Start im Feld steht
 QUICK_DATES = ["1912-05-15"]         # Schnellauswahl beim Datumsfeld
 QUICK_IDS = {"2121": "Schnitzler"}   # Schnellauswahl; weitere Nummern ergänzbar
+COPY_MARK = "abschrift"              # Zusatz für Abschriften
+OTHER_MARK = "sonstiges"             # Zusatz für Bilder, die kein Brief sind
 LOG_NAME = "umbenennungen.csv"       # "" schaltet die Liste der Umbenennungen ab
 PMB_API = "https://pmb.acdh.oeaw.ac.at/…/person/{id}/…"   # "" schaltet die Namensabfrage ab
 ```

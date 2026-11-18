@@ -3,10 +3,13 @@
 
 Benennt Bilder nach dem Schema
 
-    d1899-12-31_s2121_r10815_p1.jpg
+    d1899-12-31_s2121_e10815_p1.jpg
 
-um (d = Datum, s = Sender, r = Empfänger, p = Seite). Braucht nur Python 3.9+,
-keine weiteren Pakete.
+um (d = Datum, s = Sender, e = Empfänger, p = Seite). Abschriften bekommen
+zusätzlich _abschrift vor der Seitenzahl; Bilder, die kein Brief sind, behalten
+ihren Namen und bekommen nur _sonstiges angehängt. Liegt im Ordner eine Datei
+mit Datierung im Namen (z. B. DLA_d1926-12-08_s14886_e2121.txt), wird sie
+vorgeschlagen. Braucht nur Python 3.9+, keine weiteren Pakete.
 
 Start:  python3 date_tool.py [ORDNER]
 """
@@ -48,6 +51,10 @@ QUICK_DATES = ["1912-05-15"]
 QUICK_IDS = {"2121": "Schnitzler"}
 # Markierung für »unsicher«, direkt hinter dem Datum: d1899-12-31u_…
 UNCERTAIN_MARK = "u"
+# Markierung für Abschriften, vor der Seitenzahl: …_e10815_abschrift_p1.jpg
+COPY_MARK = "abschrift"
+# Für Bilder, die nicht datiert werden: IMG_0001.jpg -> IMG_0001_sonstiges.jpg
+OTHER_MARK = "sonstiges"
 # Ordner mit unbeschnittenen Originalen (im Bildordner oder daneben).
 ORIG_DIR_NAME = "originale"
 # Protokoll »alter Name → neuer Name« in jedem Bildordner; "" schaltet es ab.
@@ -85,6 +92,12 @@ YEARMO_RE = re.compile(r"^\d{4}-\d{2}$")
 DONE_RE = re.compile(r"^(d[\dX]{4}-[\dX]{2}-[\dX]{2}|undatiert)", re.IGNORECASE)
 
 
+def is_done(name: str) -> bool:
+    """Schon datiert oder als »sonstiges« abgelegt?"""
+    stem = os.path.splitext(name)[0].lower()
+    return bool(DONE_RE.match(name)) or stem.endswith("_" + OTHER_MARK.lower())
+
+
 class ApiError(Exception):
     def __init__(self, message: str, status: int = 400):
         super().__init__(message)
@@ -93,7 +106,12 @@ class ApiError(Exception):
 
 # ------------------------------------------------------------------------ Datum
 
-def validate_iso(s: str) -> bool:
+def year_ok(year: int, any_year: bool) -> bool:
+    return any_year or YEAR_MIN <= year <= YEAR_MAX
+
+
+def validate_iso(s: str, any_year: bool = False) -> bool:
+    """JJJJ-MM-TT, X für unlesbare Ziffern. any_year: Zeitraum nicht prüfen."""
     su = s.upper()
     if not ISO_RE.match(su):
         return False
@@ -102,9 +120,9 @@ def validate_iso(s: str) -> bool:
             d = Date.fromisoformat(s)
         except ValueError:
             return False
-        return Date(YEAR_MIN, 1, 1) <= d <= Date(YEAR_MAX, 12, 31)
+        return year_ok(d.year, any_year)
     year_part, month_part, day_part = su[:4], su[5:7], su[8:10]
-    if "X" not in year_part and not (YEAR_MIN <= int(year_part) <= YEAR_MAX):
+    if "X" not in year_part and not year_ok(int(year_part), any_year):
         return False
     if "X" not in month_part and not (1 <= int(month_part) <= 12):
         return False
@@ -113,14 +131,14 @@ def validate_iso(s: str) -> bool:
     return True
 
 
-def validate_partial(s: str) -> bool:
+def validate_partial(s: str, any_year: bool = False) -> bool:
     """Erlaubt JJJJ, JJJJ-MM oder JJJJ-MM-TT."""
     if YEAR_RE.match(s):
-        return YEAR_MIN <= int(s) <= YEAR_MAX
+        return year_ok(int(s), any_year)
     if YEARMO_RE.match(s):
         y, m = int(s[:4]), int(s[5:7])
-        return YEAR_MIN <= y <= YEAR_MAX and 1 <= m <= 12
-    return validate_iso(s)
+        return year_ok(y, any_year) and 1 <= m <= 12
+    return validate_iso(s, any_year)
 
 
 def expand_partial(s: str) -> tuple[str, str]:
@@ -135,20 +153,21 @@ def expand_partial(s: str) -> tuple[str, str]:
     return s, s
 
 
-def make_date_part(data: dict) -> str:
+def make_date_part(data: dict, trusted: set[str] = frozenset()) -> str:
+    """trusted: Daten aus einem Vorschlag – für sie gilt der erlaubte Zeitraum nicht."""
     mode = data.get("mode")
     suffix = UNCERTAIN_MARK if data.get("uncertain") else ""
 
     if mode == "when":
         d = str(data.get("when", "")).upper()
-        if not validate_partial(d):
+        if not validate_partial(d, d in trusted):
             raise ApiError(f"Ungültiges Datum: {d}")
         start, end = expand_partial(d)
         return f"{d}{suffix}" if start == end else f"{start}_{end}{suffix}"
     if mode in ("notBeforeAfter", "fromTo"):
         keys = ("notBefore", "notAfter") if mode == "notBeforeAfter" else ("from", "to")
         a, b = (str(data.get(k, "")).upper() for k in keys)
-        if not validate_iso(a) or not validate_iso(b):
+        if not validate_iso(a, a in trusted) or not validate_iso(b, b in trusted):
             raise ApiError(f"Ungültige Daten: {a} / {b}")
         if "X" not in a + b and a > b:
             raise ApiError("Das zweite Datum liegt vor dem ersten")
@@ -176,19 +195,21 @@ def folder_number(name: str) -> str:
     return groups[-1] if groups else ""
 
 
-def name_parts(data: dict) -> list[list[str]]:
+def name_parts(data: dict, trusted: set[str] = frozenset()) -> list[list[str]]:
     """Die Bausteine des Namens ohne Seitenzahl, z. B. [['d', 'd1899-12-31'], ['s', '_s2121']]."""
     if data.get("undatiert"):
         label = re.sub(r"[^0-9A-Za-z]", "", str(data.get("label", "")))
         parts = [["d", "undatiert" + label]]
     else:
-        parts = [["d", "d" + make_date_part(data)]]
+        parts = [["d", "d" + make_date_part(data, trusted)]]
     senders = parse_ids(data.get("senders"))
     receivers = parse_ids(data.get("receivers"))
     if senders:
         parts.append(["s", "_s" + "-".join(senders)])
     if receivers:
-        parts.append(["r", "_r" + "-".join(receivers)])
+        parts.append(["e", "_e" + "-".join(receivers)])
+    if data.get("copy"):
+        parts.append(["a", "_" + COPY_MARK])
     return parts
 
 
@@ -208,11 +229,76 @@ def rename_target(data: dict) -> tuple[Path, Path, list[list[str]]]:
     """(Quelle, Ziel, Bausteine des neuen Namens) für ein Bild."""
     folder = resolve_folder(data.get("folder"))
     src = resolve_file(folder, data.get("filename"))
-    parts = name_parts(data)
+    if data.get("other"):
+        # Kein Brief: Name bleibt, nur die Markierung kommt dazu.
+        parts = [["name", src.stem], ["o", "_" + OTHER_MARK], ["ext", src.suffix]]
+        target = folder / "".join(text for _, text in parts)
+        if target.exists():
+            raise ApiError(f"{target.name} existiert bereits")
+        return src, target, parts
+    parts = name_parts(data, suggested_dates(folder_suggestion(folder)))
     base = "".join(text for _, text in parts)
     ext = src.suffix.lower()
     parts += [["p", f"_p{next_page(folder, base)}"], ["ext", ext]]
     return src, folder / "".join(text for _, text in parts), parts
+
+
+# -------------------------------------------------------------------- Vorschlag
+
+# Eine Datierung irgendwo in einem Dateinamen, z. B. DLA_d1926-12-08_s14886_e2121.txt
+_DATE = r"[\dX]{4}-[\dX]{2}-[\dX]{2}"
+HINT_RE = re.compile(
+    rf"(?:^|_)d(?P<a>{_DATE})(?:_(?P<b>{_DATE}))?(?P<u>{re.escape(UNCERTAIN_MARK)})?"
+    rf"(?:_s(?P<s>\d+(?:-\d+)*))?(?:_[er](?P<e>\d+(?:-\d+)*))?"
+    rf"(?P<copy>_{re.escape(COPY_MARK)})?(?=_|$)",
+    re.IGNORECASE)
+
+
+def parse_hint(stem: str) -> dict | None:
+    """Datierung aus einem Dateinamen – in der Form, in der man sie eintippen würde."""
+    m = HINT_RE.search(stem)
+    if not m:
+        return None
+    a, b = m["a"].upper(), (m["b"] or "").upper()
+    if not validate_iso(a, True) or (b and not validate_iso(b, True)):
+        return None
+    if not b or a == b:
+        date = {"mode": "when", "when": a}
+    elif expand_partial(a[:4]) == (a, b):            # ganzes Jahr
+        date = {"mode": "when", "when": a[:4]}
+    elif expand_partial(a[:7]) == (a, b):            # ganzer Monat
+        date = {"mode": "when", "when": a[:7]}
+    else:
+        date = {"mode": "notBeforeAfter", "notBefore": a, "notAfter": b}
+    ids = lambda g: " ".join((m[g] or "").split("-"))  # noqa: E731
+    return {**date, "uncertain": bool(m["u"]), "copy": bool(m["copy"]),
+            "senders": ids("s"), "receivers": ids("e")}
+
+
+def folder_suggestion(folder: Path) -> dict | None:
+    """Liegt im Ordner neben den Bildern eine Datei mit Datierung im Namen (und gibt es
+    nur eine Datierung), wird sie vorgeschlagen."""
+    found: dict[str, list[str]] = {}
+    try:
+        entries = sorted(folder.iterdir(), key=lambda f: f.name.lower())
+    except OSError:
+        return None
+    for f in entries:
+        if f.name.startswith(".") or is_image_name(f.name) or f.name == LOG_NAME:
+            continue
+        hint = parse_hint(f.stem)
+        if hint and f.is_file():
+            found.setdefault(json.dumps(hint, sort_keys=True), []).append(f.name)
+    if len(found) != 1:
+        return None
+    key, sources = next(iter(found.items()))
+    return {**json.loads(key), "sources": sources}
+
+
+def suggested_dates(suggestion: dict | None) -> set[str]:
+    if not suggestion:
+        return set()
+    return {suggestion[k] for k in ("when", "notBefore", "notAfter") if k in suggestion}
 
 
 # -------------------------------------------------------------------- Protokoll
@@ -297,7 +383,7 @@ def pending_images(folder: Path) -> list[str]:
     try:
         names = [
             f.name for f in folder.iterdir()
-            if is_image_name(f.name) and not DONE_RE.match(f.name) and f.is_file()
+            if is_image_name(f.name) and not is_done(f.name) and f.is_file()
         ]
     except OSError:
         return []
@@ -517,6 +603,8 @@ def api_state(_q=None) -> dict:
         "defaultDate": DEFAULT_DATE,
         "quickIds": QUICK_IDS,
         "quickDates": QUICK_DATES,
+        "copyMark": COPY_MARK,
+        "otherMark": OTHER_MARK,
         "fileManager": FILE_MANAGER,
         "pmbApi": PMB_API,
         "names": load_names(),
@@ -528,8 +616,9 @@ def api_root(data: dict) -> dict:
     return api_state()
 
 
-def api_images(q: dict) -> list[str]:
-    return pending_images(resolve_folder(q.get("folder")))
+def api_images(q: dict) -> dict:
+    folder = resolve_folder(q.get("folder"))
+    return {"images": pending_images(folder), "suggestion": folder_suggestion(folder)}
 
 
 def api_preview(data: dict) -> dict:
@@ -549,7 +638,7 @@ def api_undo(data: dict) -> dict:
     folder = resolve_folder(data.get("folder"))
     new = resolve_file(folder, data.get("new"))
     old = resolve_file(folder, data.get("old"), must_exist=False)
-    if not DONE_RE.match(new.name):
+    if not is_done(new.name):
         raise ApiError("Nur eigene Umbenennungen können zurückgenommen werden")
     if old.exists():
         raise ApiError(f"{old.name} existiert bereits")
@@ -807,8 +896,8 @@ HTML = r"""<!DOCTYPE html>
 :root {
   --bg: #1a1a1a; --panel: #212121; --side: #242424; --line: #333; --text: #e0e0e0; --muted: #8c8c8c;
   --accent: #5b8dd9; --accent-bg: #2a3f60; --accent-text: #9ecfff;
-  /* Farben der Namensbausteine: Datum, Sender, Empfänger, Seite */
-  --c-d: #e8c36a; --c-s: #7fd1a0; --c-r: #7fb4f0; --c-p: #c9a0e8;
+  /* Farben der Namensbausteine: Datum, Sender, Empfänger, Abschrift, Seite */
+  --c-d: #e8c36a; --c-s: #7fd1a0; --c-e: #7fb4f0; --c-a: #ec9a7e; --c-p: #c9a0e8;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -896,6 +985,11 @@ body.has-image #placeholder { display: none; }
 .tool:hover { background: #2e2e2e; color: #fff; border-color: #666; }
 .tool svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7;
             stroke-linecap: round; stroke-linejoin: round; }
+#suggest { display: flex; align-items: baseline; gap: 8px; margin-top: 8px; padding: 5px 9px; font-size: 11.5px;
+           border-radius: 6px; background: #1b2a21; border: 1px solid #2e5039; color: #9fd8b0; }
+#suggest-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#suggest-text code { font-family: var(--mono); font-size: 11px; }
+#suggest.changed { background: transparent; border-color: #3a3a3a; color: #8c8c8c; }
 #file-info { font-size: 11px; color: var(--muted); margin-top: 7px; min-height: 16px;
              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -907,7 +1001,7 @@ body.has-image #placeholder { display: none; }
      font: 700 11px/16px var(--mono); text-transform: none; letter-spacing: 0; }
 .k-d { background: var(--c-d); }
 .k-s { background: var(--c-s); }
-.k-r { background: var(--c-r); }
+.k-e { background: var(--c-e); }
 
 .mode-tabs { display: flex; gap: 4px; }
 .mode-tab { padding: 4px 7px; flex: none; border-radius: 14px; border: 1px solid #444; background: transparent;
@@ -931,8 +1025,12 @@ body.has-image #placeholder { display: none; }
 .chip:hover { background: #2a2a2a; color: #ddd; }
 .chip.on { background: var(--accent-bg); border-color: var(--accent); color: var(--accent-text); }
 .chip.mono { font-family: var(--mono); font-size: 12px; }
-.uncertain-row { display: flex; align-items: center; gap: 7px; color: #bbb; cursor: pointer; white-space: nowrap; }
-.uncertain-row input { width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); }
+.check-row { display: flex; align-items: center; gap: 7px; color: #bbb; cursor: pointer; white-space: nowrap; }
+.check-row input { width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); }
+#copy-row { align-self: flex-start; }
+#copy-row .hint { font-size: 11px; color: #6c6c6c; }
+#copy-row .hint code { font-family: var(--mono); color: #8a8a8a; }
+#copy-row:has(input:checked) { color: var(--c-a); }
 
 .person { display: flex; flex-direction: column; gap: 4px; }
 .person-line { display: flex; align-items: center; gap: 8px; }
@@ -951,7 +1049,10 @@ body.has-image #placeholder { display: none; }
 #preview-name.hint { font-family: inherit; font-size: 12px; color: #c9a25e; word-break: normal; }
 .seg-d { color: var(--c-d); }
 .seg-s { color: var(--c-s); }
-.seg-r { color: var(--c-r); }
+.seg-e { color: var(--c-e); }
+.seg-a { color: var(--c-a); }
+.seg-name { color: #bbb; }
+.seg-o { color: var(--c-a); }
 .seg-p { color: var(--c-p); }
 .seg-ext { color: #888; }
 
@@ -1059,6 +1160,11 @@ body.has-image #placeholder { display: none; }
       <button class="tool" onclick="rotateView()" tabindex="-1" title="Ansicht drehen (Taste R) – die Datei bleibt unverändert"><svg viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.6-3.7"/><path d="M13.4 1.8v3h-3"/></svg></button>
     </div>
     <div id="file-info"></div>
+    <div id="suggest" hidden>
+      <span id="suggest-text"></span>
+      <button class="link-btn" id="suggest-apply" onclick="applySuggestion()" tabindex="-1"
+              title="Datum, Sender und Empfänger wieder aus dem Vorschlag übernehmen">wieder eintragen</button>
+    </div>
   </div>
 
   <div class="sect needs-folder">
@@ -1067,12 +1173,12 @@ body.has-image #placeholder { display: none; }
       <button class="mode-tab active" tabindex="-1" onclick="setMode('when')" title="when – ein Tag, ein Monat oder ein Jahr">Datum</button>
       <button class="mode-tab" tabindex="-1" onclick="setMode('notBeforeAfter')" title="notBefore / notAfter">frühestens / spätestens</button>
       <button class="mode-tab" tabindex="-1" onclick="setMode('fromTo')" title="from / to">von / bis</button>
-      <button class="mode-tab" tabindex="-1" onclick="setMode('undatiert')" title="Ohne Datum benennen: undatiert_s…_r…">undatiert</button>
+      <button class="mode-tab" tabindex="-1" onclick="setMode('undatiert')" title="Ohne Datum benennen: undatiert_s…_e…">undatiert</button>
     </div>
     <div class="date-inputs" id="date-inputs"></div>
     <div class="date-extra" id="date-extra">
       <div class="chips" id="quick-dates"></div>
-      <label class="uncertain-row" title="Hängt ein u ans Datum (Taste U)">
+      <label class="check-row" title="Hängt ein u ans Datum (Taste U)">
         <input type="checkbox" id="chk-uncertain"> unsicher
       </label>
     </div>
@@ -1090,13 +1196,19 @@ body.has-image #placeholder { display: none; }
     </div>
     <button id="btn-swap" onclick="swapPersons()" tabindex="-1" title="Sender und Empfänger tauschen (Taste S)">&#8593;&#8595; tauschen</button>
     <div class="person">
-      <label class="sect-title" for="p-r"><span class="k k-r">r</span> An <i>(Empfänger)</i></label>
+      <label class="sect-title" for="p-e"><span class="k k-e">e</span> An <i>(Empfänger)</i></label>
       <div class="person-line">
-        <input type="text" class="person-field" id="p-r" placeholder="Nr." oninput="onPersonInput()">
-        <div class="chips" id="chips-r"></div>
+        <input type="text" class="person-field" id="p-e" placeholder="Nr." oninput="onPersonInput()">
+        <div class="chips" id="chips-e"></div>
       </div>
-      <div class="names" id="names-r"></div>
+      <div class="names" id="names-e"></div>
     </div>
+  </div>
+
+  <div class="sect needs-folder">
+    <label class="check-row" id="copy-row">
+      <input type="checkbox" id="chk-copy"> Abschrift <span class="hint"></span>
+    </label>
   </div>
 
   <div class="sect needs-folder" id="preview-box">
@@ -1108,6 +1220,7 @@ body.has-image #placeholder { display: none; }
     <button id="btn-submit" class="needs-folder" onclick="submitDate()" disabled>Umbenennen &amp; weiter <kbd>&#8629;</kbd></button>
     <div class="btn-row">
       <button class="btn2 needs-folder" id="btn-skip" onclick="skipImage()" title="Nächstes Bild, ohne umzubenennen (↓)">Überspringen</button>
+      <button class="btn2 needs-folder" id="btn-other" onclick="markOther()">Sonstiges</button>
       <button class="btn2" id="btn-undo" onclick="undo()" disabled>Rückgängig</button>
     </div>
     <button class="btn2 needs-folder" id="btn-original" onclick="useOriginal()" hidden title="Ausschnitt durch das unbeschnittene Foto ersetzen">Unbeschnittenes Original verwenden</button>
@@ -1120,6 +1233,8 @@ body.has-image #placeholder { display: none; }
     <kbd>&#8595;</kbd><span>nächstes Bild</span>
     <kbd>U</kbd><span>unsicher</span>
     <kbd>&#8593;</kbd><span>vorheriges Bild</span>
+    <kbd>A</kbd><span>Abschrift</span>
+    <kbd>O</kbd><span>sonstiges &amp; weiter</span>
     <kbd>R</kbd><span>Ansicht drehen</span>
   </div>
 </div>
@@ -1172,13 +1287,14 @@ let cfg = { root: null, folders: [], yearMin: 0, yearMax: 9999, defaultDate: "",
             quickDates: [], fileManager: "Dateimanager" };
 let allFolders = [], currentFolder = null, images = [], imgIdx = 0, mode = "when";
 let finished = null;        // { name, next } – der zuletzt abgeschlossene Ordner
-let freshImage = true;      // seit dem letzten Umbenennen wurde am Datum nichts geändert
 let stopped = false;        // Tool wurde beendet
 const undoStack = [];
 
 // Zuletzt verwendete Werte pro Datumsfeld und Sender/Empfänger pro Ordner
 const lastValues = {};
 let personsByFolder = {};
+let suggestion = null;      // Datierung aus einem Dateinamen im Ordner (z. B. DLA_d1926-12-08_s…_e….txt)
+let lastFolder = null;      // zuletzt geöffneter Ordner – sein Vorschlag steht schon in den Feldern
 let lastDateField = null;
 
 // ---- Server ----
@@ -1235,6 +1351,8 @@ function applyState(state) {
   $("root-btn").title = (state.root ? state.root + "\n" : "") + "Klick: anderen Ordner wählen";
   $("btn-original").hidden = !state.hasOriginals;
   $("btn-reveal").textContent = `im ${state.fileManager} zeigen`;
+  document.querySelector("#copy-row .hint").replaceChildren("→ ", el("code", "", "_" + state.copyMark));
+  $("copy-row").title = `Der Brief ist eine Abschrift: hängt _${state.copyMark} vor die Seitenzahl (Taste A)`;
   renderQuickDates();
   renderPlaceholder();
   filterList();
@@ -1322,24 +1440,28 @@ function focusDate() {
 
 async function openFolder(key, selectFile) {
   savePersons();
-  let list;
-  try { list = await api(`/api/images?folder=${encodeURIComponent(key)}`); }
+  let data;
+  try { data = await api(`/api/images?folder=${encodeURIComponent(key)}`); }
   catch (e) { setStatus("Fehler: " + e.message, true); return; }
-  if (!list.length) {              // inzwischen außerhalb des Tools geändert
+  if (!data.images.length) {       // inzwischen außerhalb des Tools geändert
     closeFolder();
     await loadState();
     return;
   }
-  currentFolder = key; images = list; finished = null;
+  currentFolder = key; images = data.images; finished = null; suggestion = data.suggestion;
   imgIdx = Math.max(0, selectFile ? images.indexOf(selectFile) : 0);
   const info = folderInfo(key);
   $("folder-title").textContent = info ? info.name : key;
   $("folder-title").title = $("folder-title").textContent;
   $("panel").classList.remove("off");
   $("btn-submit").disabled = false;
-  setUncertain(false);
-  freshImage = true;
+  for (const name in MARKS) setMark(name, false);
+  newImage();
   loadPersons();
+  // Beim Wechsel in einen Ordner mit Vorschlag steht er in den Feldern; beim erneuten Öffnen
+  // desselben Ordners (z. B. nach »Rückgängig«) bleibt, was man eingetragen hat.
+  if (suggestion && key !== lastFolder) applySuggestion();
+  lastFolder = key;
   filterList();
   showImage();
   updatePreview();
@@ -1348,12 +1470,13 @@ async function openFolder(key, selectFile) {
 
 function closeFolder() {
   savePersons();
-  currentFolder = null; images = [];
+  currentFolder = null; images = []; suggestion = null;
+  renderSuggestion();
   $("folder-title").textContent = "Kein Ordner gewählt";
   $("panel").classList.add("off");
   $("btn-submit").disabled = true;
   $("preview-name").textContent = "";
-  $("chips-s").replaceChildren(); $("chips-r").replaceChildren();
+  $("chips-s").replaceChildren(); $("chips-e").replaceChildren();
   renderNames(true);
   showImage();
   filterList();
@@ -1371,6 +1494,7 @@ function showImage() {
   $("img-display").src = imgUrl(currentFolder, images[imgIdx]);
   $("img-counter").textContent = `Bild ${imgIdx + 1} von ${images.length}`;
   $("file-info").textContent = $("file-info").title = images[imgIdx];
+  $("btn-other").title = `Kein Brief, nicht datieren: wird zu ${otherName(images[imgIdx])} (Taste O)`;
   // Das nächste Bild schon laden, damit es nach dem Umbenennen sofort da ist.
   if (images.length > 1) new Image().src = imgUrl(currentFolder, images[(imgIdx + 1) % images.length]);
 }
@@ -1512,10 +1636,12 @@ document.addEventListener("keydown", e => {
     e.preventDefault();
     navigate(e.key === "ArrowRight" ? 1 : -1);
   } else {
-    // S, U und R sind keine Datumszeichen und deshalb als Kürzel frei.
+    // Buchstaben außer X sind keine Datumszeichen und deshalb als Kürzel frei.
     const k = e.key.toLowerCase();
     if (k === "s") { e.preventDefault(); swapPersons(); }
-    else if (k === "u") { e.preventDefault(); toggleUncertain(); }
+    else if (k === "u") { e.preventDefault(); toggleMark("uncertain"); }
+    else if (k === "a") { e.preventDefault(); toggleMark("copy"); }
+    else if (k === "o") { e.preventDefault(); markOther(); }
     else if (k === "r") { e.preventDefault(); rotateView(); }
   }
 });
@@ -1527,7 +1653,7 @@ function parseIds(s) {
 
 function savePersons() {
   if (currentFolder === null) return;
-  personsByFolder[currentFolder] = { s: $("p-s").value, r: $("p-r").value };
+  personsByFolder[currentFolder] = { s: $("p-s").value, e: $("p-e").value };
 }
 
 function loadPersons() {
@@ -1537,9 +1663,9 @@ function loadPersons() {
     const info = folderInfo(currentFolder);
     const quick = Object.keys(cfg.quickIds)[0] || "";
     const num = info ? info.number : "";
-    p = { s: num, r: num === quick ? "" : quick };
+    p = { s: num, e: num === quick ? "" : quick };
   }
-  $("p-s").value = p.s; $("p-r").value = p.r;
+  $("p-s").value = p.s; $("p-e").value = p.e;
   renderChips();
   renderNames(true);
 }
@@ -1556,7 +1682,7 @@ function chipList() {
 }
 
 function renderChips() {
-  for (const side of ["s", "r"]) {
+  for (const side of ["s", "e"]) {
     const ids = currentFolder === null ? [] : parseIds($("p-" + side).value);
     $("chips-" + side).replaceChildren(...(currentFolder === null ? [] : chipList()).map(c => {
       const b = el("button", "chip" + (ids.includes(c.id) ? " on" : ""), c.label);
@@ -1579,8 +1705,8 @@ function toggleId(side, id) {
 }
 
 function swapPersons() {
-  const s = $("p-s"), r = $("p-r");
-  [s.value, r.value] = [r.value, s.value];
+  const s = $("p-s"), e = $("p-e");
+  [s.value, e.value] = [e.value, s.value];
   onPersonInput();
 }
 
@@ -1600,7 +1726,7 @@ function personInfo(id) {
 // beim Tippen erst nach einer kurzen Pause, damit nicht jede Zwischenziffer abgefragt wird.
 function renderNames(immediate) {
   const unknown = [];
-  for (const side of ["s", "r"]) {
+  for (const side of ["s", "e"]) {
     const box = $("names-" + side);
     box.replaceChildren();
     if (currentFolder === null) continue;
@@ -1675,6 +1801,7 @@ function renderInputs() {
 function onLabelInput(e) {
   e.target.value = e.target.value.replace(/[^0-9A-Za-z]/g, "");
   lastValues["undatiert-label"] = e.target.value;
+  letterChanged();
   updatePreview();
 }
 
@@ -1706,22 +1833,37 @@ function setQuickDate(d) {
   field.select();
 }
 
-// »unsicher« gilt für einen Brief: Mit dem ersten neuen Datum nach dem Umbenennen fällt es weg.
+// »unsicher« und »Abschrift« gelten für einen Brief: Sie bleiben für die folgenden Seiten stehen
+// und fallen weg, sobald man nach dem Umbenennen ein neues Datum (oder eine neue Brief-Nr.)
+// eintippt. Was man für das neue Bild selbst an- oder abhakt, bleibt.
+const MARKS = { uncertain: "chk-uncertain", copy: "chk-copy" };
+let carried = new Set();        // Markierungen, die noch vom vorigen Brief stammen
+
+function setMark(name, on) { $(MARKS[name]).checked = on; }
+function isMarked(name) { return $(MARKS[name]).checked; }
+
+function toggleMark(name) {
+  setMark(name, !isMarked(name));
+  carried.delete(name);
+  updatePreview();
+}
+
+function newImage() { carried = new Set(Object.keys(MARKS)); }
+
+function letterChanged() {
+  carried.forEach(name => setMark(name, false));
+  carried.clear();
+}
+
 function dateChanged() {
-  if (freshImage) { freshImage = false; setUncertain(false); }
+  letterChanged();
   markQuickDates();
   updatePreview();
 }
 
-function setUncertain(on) { $("chk-uncertain").checked = on; }
-
-function toggleUncertain() {
-  setUncertain(!$("chk-uncertain").checked);
-  freshImage = false;
-  updatePreview();
+for (const name in MARKS) {
+  $(MARKS[name]).addEventListener("change", () => { carried.delete(name); updatePreview(); focusDate(); });
 }
-
-$("chk-uncertain").addEventListener("change", () => { freshImage = false; updatePreview(); focusDate(); });
 
 // Setzt die Bindestriche: von selbst, sobald Jahr oder Monat voll sind – und sofort, wenn man
 // sie tippt. Ein getippter Bindestrich füllt einen einstelligen Monat auf (»1899-1-« → »1899-01-«).
@@ -1771,13 +1913,16 @@ function onDateInput(e) {
   dateChanged();
 }
 
-function yearOk(y) { return y >= cfg.yearMin && y <= cfg.yearMax; }
+// Der erlaubte Zeitraum fängt Tippfehler ab – für ein vorgeschlagenes Datum gilt er nicht.
+function yearOk(y, s) {
+  return (y >= cfg.yearMin && y <= cfg.yearMax) || suggestedDates().has(s.toUpperCase());
+}
 
 function isValidWhen(s) {
-  if (/^\d{4}$/.test(s)) return yearOk(parseInt(s));
+  if (/^\d{4}$/.test(s)) return yearOk(parseInt(s), s);
   if (/^\d{4}-\d{2}$/.test(s)) {
     const [y, m] = s.split("-").map(Number);
-    return yearOk(y) && m >= 1 && m <= 12;
+    return yearOk(y, s) && m >= 1 && m <= 12;
   }
   return isValidISO(s);
 }
@@ -1786,7 +1931,7 @@ function isValidISO(s) {
   if (!ISO_RE.test(s)) return false;
   const u = s.toUpperCase();
   const yearPart = u.slice(0, 4), monthPart = u.slice(5, 7), dayPart = u.slice(8, 10);
-  if (!/X/.test(yearPart) && !yearOk(parseInt(yearPart))) return false;
+  if (!/X/.test(yearPart) && !yearOk(parseInt(yearPart), s)) return false;
   if (!/X/.test(monthPart)) {
     const m = parseInt(monthPart);
     if (m < 1 || m > 12) return false;
@@ -1828,13 +1973,20 @@ function dateProblem() {
 function requestBody(extra) {
   return {
     folder: currentFolder, filename: images[imgIdx],
-    senders: $("p-s").value, receivers: $("p-r").value, ...extra
+    senders: $("p-s").value, receivers: $("p-e").value, ...extra
   };
 }
 
 function dateBody() {
-  if (mode === "undatiert") return requestBody({ undatiert: true, label: $("undatiert-label")?.value || "" });
-  return requestBody({ mode, uncertain: $("chk-uncertain").checked, ...getDateValues() });
+  const copy = isMarked("copy");
+  if (mode === "undatiert") return requestBody({ undatiert: true, copy, label: $("undatiert-label")?.value || "" });
+  return requestBody({ mode, copy, uncertain: isMarked("uncertain"), ...getDateValues() });
+}
+
+// Bild ohne Datum ablegen: IMG_0001.jpg -> IMG_0001_sonstiges.jpg
+function otherName(file) {
+  const dot = file.lastIndexOf(".");
+  return dot > 0 ? `${file.slice(0, dot)}_${cfg.otherMark}${file.slice(dot)}` : `${file}_${cfg.otherMark}`;
 }
 
 // Der Server kennt die schon vergebenen Namen und damit die Seitenzahl.
@@ -1843,6 +1995,7 @@ async function updatePreview() {
   const pv = $("preview-name");
   const seq = ++previewSeq;
   const hint = text => { pv.className = "hint"; pv.textContent = text; };
+  renderSuggestion();
   if (currentFolder === null || !images.length) { pv.className = ""; pv.textContent = ""; return; }
   const problem = dateProblem();
   if (problem) { hint(problem); return; }
@@ -1852,6 +2005,52 @@ async function updatePreview() {
   if (seq !== previewSeq) return;
   pv.className = "";
   pv.replaceChildren(...data.parts.map(([kind, text]) => el("span", "seg-" + kind, text)));
+}
+
+// ---- Vorschlag aus einem Dateinamen im Ordner ----
+function suggestedDates() {
+  if (!suggestion) return new Set();
+  return new Set(["when", "notBefore", "notAfter"].map(k => suggestion[k]).filter(Boolean));
+}
+
+function suggestionHasPersons() { return !!(suggestion.senders || suggestion.receivers); }
+
+// Trägt Datum, Sender, Empfänger und Markierungen aus dem Vorschlag ein.
+function applySuggestion() {
+  const sg = suggestion;
+  if (!sg || currentFolder === null) return;
+  FIELDS[sg.mode].forEach(([id]) => { lastValues[id] = sg[id.slice(2)]; });
+  if (suggestionHasPersons()) { $("p-s").value = sg.senders; $("p-e").value = sg.receivers; }
+  setMark("uncertain", sg.uncertain);
+  setMark("copy", sg.copy);
+  newImage();                  // wie ein Brief: ein neues Datum nimmt die Markierungen wieder weg
+  renderChips();
+  renderNames(true);
+  setMode(sg.mode);            // zeichnet die Felder neu und aktualisiert die Vorschau
+}
+
+function suggestionMatches() {
+  const sg = suggestion;
+  if (!sg || mode !== sg.mode) return false;
+  const vals = getDateValues();
+  if (!FIELDS[sg.mode].every(([id]) => vals[id.slice(2)].toUpperCase() === sg[id.slice(2)])) return false;
+  const same = (a, b) => parseIds(a).join(" ") === parseIds(b).join(" ");
+  if (suggestionHasPersons() && !(same($("p-s").value, sg.senders) && same($("p-e").value, sg.receivers))) return false;
+  return isMarked("uncertain") === sg.uncertain && isMarked("copy") === sg.copy;
+}
+
+function renderSuggestion() {
+  const box = $("suggest"), sg = suggestion;
+  box.hidden = !sg || currentFolder === null;
+  if (box.hidden) return;
+  const matches = suggestionMatches();
+  box.classList.toggle("changed", !matches);
+  $("suggest-apply").hidden = matches;
+  const more = sg.sources.length - 1;
+  $("suggest-text").replaceChildren(matches ? "✓ Vorschlag aus " : "Vorschlag aus ",
+                                    el("code", "", sg.sources[0]), more ? ` (+${more})` : "");
+  box.title = (more ? `${sg.sources.length} Dateien mit derselben Datierung:\n` : "Datierung aus dem Dateinamen:\n")
+    + sg.sources.join("\n") + (matches ? "\n\n↵ übernimmt den Vorschlag." : "");
 }
 
 // ---- Umbenennen ----
@@ -1876,6 +2075,11 @@ function submitDate() {
   rename(dateBody());
 }
 
+function markOther() {
+  if (currentFolder === null || !images.length) return;
+  rename(requestBody({ other: true }));
+}
+
 function updateUndoButton() {
   const last = undoStack[undoStack.length - 1];
   $("btn-undo").disabled = !last;
@@ -1898,7 +2102,7 @@ async function undo() {
 function afterMove() {
   const fi = allFolders.findIndex(f => f.key === currentFolder);
   images.splice(imgIdx, 1);
-  freshImage = true;
+  newImage();
   if (fi !== -1) allFolders[fi].count = images.length;
   if (!images.length) {
     const name = fi !== -1 ? allFolders[fi].name : currentFolder;
@@ -2005,6 +2209,7 @@ async function chooseCurrent() {
   closeFolder();
   undoStack.length = 0; updateUndoButton();     // gehören zum alten Ordner
   personsByFolder = {};
+  lastFolder = null;
   finished = null;
   setStatus("");
   applyState(state);
