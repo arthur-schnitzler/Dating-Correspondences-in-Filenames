@@ -1,0 +1,44 @@
+ERSTER START AUF DEM MAC
+========================
+
+macOS blockiert beim ersten Mal alles, was aus dem Internet geladen wurde und
+nicht bei Apple registriert ist. Das ist normal und muss nur EINMAL erlaubt
+werden. Danach startet das Tool mit Doppelklick auf start-mac.command.
+
+
+WEG 1 – über die Systemeinstellungen
+------------------------------------
+
+1. Doppelklick auf start-mac.command.
+   Es erscheint: »start-mac.command« wurde nicht geöffnet.
+   -> auf »Fertig« klicken (NICHT »In den Papierkorb legen«).
+
+2. Apfel-Menü  ->  Systemeinstellungen  ->  Datenschutz & Sicherheit.
+
+3. Ganz nach unten scrollen. Dort steht:
+   »start-mac.command« wurde blockiert …
+   -> auf »Dennoch öffnen« klicken, Passwort oder Touch ID eingeben.
+
+4. Noch einmal Doppelklick auf start-mac.command -> »Öffnen«.
+
+Fertig. Das Tool entfernt dabei die Sperre für den ganzen Ordner;
+ab jetzt genügt der Doppelklick.
+
+
+WEG 2 – über das Terminal (schneller)
+-------------------------------------
+
+1. Programm »Terminal« öffnen (Spotlight: cmd + Leertaste, »Terminal«).
+
+2. Folgendes eintippen, MIT Leerzeichen am Ende, aber noch NICHT Enter drücken:
+
+   xattr -dr com.apple.quarantine 
+
+3. Diesen Ordner aus dem Finder ins Terminal-Fenster ziehen
+   (der Pfad wird eingefügt) und dann Enter drücken.
+
+Danach öffnet sich start-mac.command mit Doppelklick ohne Nachfrage.
+
+
+Hinweis: Lädt man das Tool neu herunter, ist die neue Kopie wieder gesperrt.
+Am besten immer denselben Ordner weiterverwenden.

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import mimetypes
 import os
@@ -64,11 +65,18 @@ LOG_NAME = "umbenennungen.csv"
 # "" schaltet die Abfrage ab. Nummern aus QUICK_IDS werden nie abgefragt.
 PMB_API = "https://pmb.acdh.oeaw.ac.at/apis/api/entities/person/{id}/?format=json"
 
-IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".gif", ".webp"}
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".gif", ".webp", ".pdf"}
 CONFIG_FILE = Path.home() / ".dating-correspondences.json"
 # Einmal abgefragte Namen bleiben hier gespeichert und stehen auch ohne Netz bereit.
 NAMES_FILE = Path.home() / ".dating-correspondences-names.json"
 PREVIEW_CACHE = Path(tempfile.gettempdir()) / "dating_orig_preview"
+# PDFs zeigt PDF.js an. Es wird beim ersten PDF einmal geladen, geprüft und hier abgelegt.
+PDFJS_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/{name}"
+PDFJS_FILES = {
+    "pdf.min.mjs": "27fc2a057a00f92a4334ad06e17dbd7259912954e9fb7f76400bcca5fd190a9c",
+    "pdf.worker.min.mjs": "1baa1844c89c80a5b2797c916e75ab29254be46d8e9cb53cb6364d7aad84be36",
+}
+PDFJS_DIR = Path.home() / ".dating-correspondences-pdfjs" / "4.10.38"
 # So lange wartet das Tool nach dem Schließen des Tabs, bevor es sich beendet
 # (ein Neuladen der Seite meldet sich in dieser Zeit wieder an).
 QUIT_DELAY = 4.0
@@ -714,13 +722,13 @@ def api_use_original(data: dict) -> dict:
 _names_lock = threading.Lock()
 
 
-def fetch_json(url: str):
-    """Holt JSON von einer Adresse; None, wenn es den Eintrag nicht gibt (404)."""
-    request = urllib.request.Request(url, headers={"Accept": "application/json",
+def fetch_bytes(url: str, accept: str = "*/*", timeout: int = 8) -> bytes | None:
+    """Holt eine Adresse; None, wenn es den Eintrag nicht gibt (404)."""
+    request = urllib.request.Request(url, headers={"Accept": accept,
                                                    "User-Agent": "dating-correspondences-tool"})
     try:
-        with urllib.request.urlopen(request, timeout=8) as response:
-            return json.load(response)
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read()
     except urllib.error.HTTPError as e:
         if e.code == 404:
             return None
@@ -729,12 +737,45 @@ def fetch_json(url: str):
         # Manchen Python-Installationen (v. a. unter macOS) fehlen die Zertifikate; curl hat sie.
         if not shutil.which("curl"):
             raise
-        result = subprocess.run(["curl", "-sS", "-m", "8", "-H", "Accept: application/json",
-                                 "-w", "\n%{http_code}", url], capture_output=True, text=True)
-        body, _, status = result.stdout.rpartition("\n")
-        if result.returncode != 0 or status not in ("200", "404"):
-            raise
-        return json.loads(body) if status == "200" else None
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "body"
+            result = subprocess.run(["curl", "-sS", "-m", str(timeout), "-H", f"Accept: {accept}",
+                                     "-o", str(out), "-w", "%{http_code}", url],
+                                    capture_output=True, text=True)
+            status = result.stdout.strip()
+            if result.returncode != 0 or status not in ("200", "404"):
+                raise
+            return out.read_bytes() if status == "200" else None
+
+
+def fetch_json(url: str):
+    """Holt JSON von einer Adresse; None, wenn es den Eintrag nicht gibt (404)."""
+    body = fetch_bytes(url, "application/json")
+    return None if body is None else json.loads(body)
+
+
+_pdfjs_lock = threading.Lock()
+
+
+def pdfjs_path(name: str) -> Path:
+    """Datei von PDF.js – beim ersten Mal aus dem Netz, danach aus dem Zwischenspeicher."""
+    if name not in PDFJS_FILES:
+        raise ApiError("not found", 404)
+    path = PDFJS_DIR / name
+    with _pdfjs_lock:
+        if path.is_file():
+            return path
+        try:
+            body = fetch_bytes(PDFJS_URL.format(name=name), timeout=30)
+        except Exception as e:  # noqa: BLE001 – kein Netz, Zeitüberschreitung
+            raise ApiError(f"PDF.js nicht erreichbar: {e}", 502)
+        if body is None or hashlib.sha256(body).hexdigest() != PDFJS_FILES[name]:
+            raise ApiError("PDF.js: unerwartete Datei", 502)
+        PDFJS_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".part")
+        tmp.write_bytes(body)
+        tmp.replace(path)
+    return path
 
 
 def api_person(q: dict) -> dict:
@@ -825,7 +866,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header(key, value)
             self.end_headers()
             return
-        ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        if path.suffix == ".mjs":
+            ctype = "text/javascript"
+        else:
+            ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         self._send(200, path.read_bytes(), ctype, headers)
 
     def _local_only(self) -> bool:
@@ -863,6 +907,8 @@ class Handler(BaseHTTPRequestHandler):
             self._file(resolve_file(resolve_folder(q.get("folder")), q.get("file")))
         elif url.path == "/api/original-preview":
             self._file(original_preview_path(q))
+        elif url.path.startswith("/pdfjs/"):
+            self._file(pdfjs_path(url.path[len("/pdfjs/"):]))
         elif url.path in GET_ROUTES:
             self._json(GET_ROUTES[url.path](q))
         else:
@@ -959,6 +1005,10 @@ body.nosidebar #side-head .caps { writing-mode: vertical-rl; }
 #img-display.zoomed { cursor: grab; }
 #img-display.dragging { cursor: grabbing; transition: none; }
 body.has-image #img-display { display: block; }
+/* PDF in der Ansicht des Browsers – nur, wenn PDF.js nicht geladen werden konnte */
+#pdf-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #111; display: none; }
+body.has-image.pdf-native #pdf-frame { display: block; }
+body.has-image.pdf-native #img-display { display: none; }
 body.has-image #placeholder { display: none; }
 #placeholder { color: #888; font-size: 15px; text-align: center; line-height: 1.7; padding: 24px; }
 #placeholder b { color: #ccc; font-weight: 600; }
@@ -983,6 +1033,11 @@ body.has-image #placeholder { display: none; }
 .tool { width: 28px; height: 26px; flex: none; background: transparent; border: 1px solid #444;
         border-radius: 6px; color: #bbb; display: flex; align-items: center; justify-content: center; }
 .tool:hover { background: #2e2e2e; color: #fff; border-color: #666; }
+.tool:disabled { opacity: .3; pointer-events: none; }
+#pdf-row { display: flex; align-items: center; gap: 4px; margin-top: 6px; }
+#pdf-row[hidden], body.pdf-native #pdf-row .tool { display: none; }
+#pdf-counter { min-width: 92px; text-align: center; color: #ccc; font-size: 12px; white-space: nowrap; }
+#pdf-note { flex: 1; min-width: 0; font-size: 11px; color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7;
             stroke-linecap: round; stroke-linejoin: round; }
 #suggest { display: flex; align-items: baseline; gap: 8px; margin-top: 8px; padding: 5px 9px; font-size: 11.5px;
@@ -1141,6 +1196,7 @@ body.has-image #placeholder { display: none; }
 <div id="viewer">
   <div id="placeholder"></div>
   <img id="img-display" alt="">
+  <iframe id="pdf-frame" title="PDF"></iframe>
 </div>
 
 <div id="panel" class="off">
@@ -1158,6 +1214,12 @@ body.has-image #placeholder { display: none; }
       <button class="tool" onclick="zoomStep(1.5)" tabindex="-1" title="Vergrößern (auch: Mausrad oder Doppelklick ins Bild)"><svg viewBox="0 0 16 16"><path d="M3 8h10M8 3v10"/></svg></button>
       <button class="tool" onclick="resetView(false)" tabindex="-1" title="Ganzes Bild zeigen"><svg viewBox="0 0 16 16"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"/></svg></button>
       <button class="tool" onclick="rotateView()" tabindex="-1" title="Ansicht drehen (Taste R) – die Datei bleibt unverändert"><svg viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.6-3.7"/><path d="M13.4 1.8v3h-3"/></svg></button>
+    </div>
+    <div id="pdf-row" class="needs-folder" hidden>
+      <button class="tool" id="pdf-prev" onclick="pdfPage(-1)" tabindex="-1" title="Vorherige Seite im PDF (Taste Bild ↑, am Mac fn ↑)"><svg viewBox="0 0 16 16"><path d="M10 3 5 8l5 5"/></svg></button>
+      <span id="pdf-counter"></span>
+      <button class="tool" id="pdf-next" onclick="pdfPage(1)" tabindex="-1" title="Nächste Seite im PDF (Taste Bild ↓, am Mac fn ↓)"><svg viewBox="0 0 16 16"><path d="m6 3 5 5-5 5"/></svg></button>
+      <span id="pdf-note"></span>
     </div>
     <div id="file-info"></div>
     <div id="suggest" hidden>
@@ -1271,8 +1333,8 @@ body.has-image #placeholder { display: none; }
 <div id="gone" class="overlay">
   <div class="dialog">
     <h2 id="gone-title">Das Tool läuft nicht mehr</h2>
-    <p id="gone-text">Zum Weiterarbeiten das Tool neu starten (Doppelklick auf <code>start.command</code>
-      bzw. <code>start.bat</code>) und diese Seite neu laden.</p>
+    <p id="gone-text">Zum Weiterarbeiten das Tool neu starten (Doppelklick auf <code>start-mac.command</code>
+      bzw. <code>start-win.bat</code>) und diese Seite neu laden.</p>
     <div class="ch-foot"><div id="ch-spacer" style="flex:1"></div>
       <button class="dlg-btn" id="gone-reload" onclick="location.reload()">Seite neu laden</button></div>
   </div>
@@ -1485,18 +1547,116 @@ function closeFolder() {
 function showImage() {
   const has = currentFolder !== null && images.length > 0;
   document.body.classList.toggle("has-image", has);
+  viewToken++;
+  closePdf();
   if (!has) {
-    $("img-display").removeAttribute("src");
+    setImageSrc(null);
     $("file-info").textContent = $("img-counter").textContent = "";
     return;
   }
   resetView(true);
-  $("img-display").src = imgUrl(currentFolder, images[imgIdx]);
+  const file = images[imgIdx];
+  if (isPdf(file)) showPdf(file);
+  else setImageSrc(imgUrl(currentFolder, file));
   $("img-counter").textContent = `Bild ${imgIdx + 1} von ${images.length}`;
-  $("file-info").textContent = $("file-info").title = images[imgIdx];
-  $("btn-other").title = `Kein Brief, nicht datieren: wird zu ${otherName(images[imgIdx])} (Taste O)`;
+  $("file-info").textContent = $("file-info").title = file;
+  $("btn-other").title = `Kein Brief, nicht datieren: wird zu ${otherName(file)} (Taste O)`;
   // Das nächste Bild schon laden, damit es nach dem Umbenennen sofort da ist.
-  if (images.length > 1) new Image().src = imgUrl(currentFolder, images[(imgIdx + 1) % images.length]);
+  const next = images[(imgIdx + 1) % images.length];
+  if (images.length > 1 && !isPdf(next)) new Image().src = imgUrl(currentFolder, next);
+}
+
+let blobUrl = null;         // gerenderte PDF-Seite
+function setImageSrc(src) {
+  const img = $("img-display");
+  if (src) img.src = src; else img.removeAttribute("src");
+  if (blobUrl && blobUrl !== src) URL.revokeObjectURL(blobUrl);
+  blobUrl = src && src.startsWith("blob:") ? src : null;
+}
+
+// ---- PDF: jede Seite wird mit PDF.js gerendert und wie ein Bild angezeigt ----
+let pdfjs = null;           // Promise des PDF.js-Moduls
+let pdf = null;             // { doc, page } – das angezeigte PDF
+let viewToken = 0;          // veraltete Ladevorgänge erkennen (schnelles Blättern)
+
+const isPdf = name => /\.pdf$/i.test(name);
+
+function loadPdfjs() {
+  if (!pdfjs) {
+    pdfjs = import("/pdfjs/pdf.min.mjs").then(lib => {
+      lib.GlobalWorkerOptions.workerSrc = "/pdfjs/pdf.worker.min.mjs";
+      return lib;
+    });
+    pdfjs.catch(() => { pdfjs = null; });      // beim nächsten PDF noch einmal versuchen
+  }
+  return pdfjs;
+}
+
+function closePdf() {
+  if (pdf) pdf.doc.destroy();
+  pdf = null;
+  document.body.classList.remove("pdf-native");
+  $("pdf-frame").removeAttribute("src");
+  $("pdf-row").hidden = true;
+}
+
+async function showPdf(file) {
+  const token = viewToken;
+  setImageSrc(null);
+  $("pdf-row").hidden = false;
+  $("pdf-counter").textContent = "PDF lädt …";
+  $("pdf-note").textContent = "";
+  $("pdf-prev").disabled = $("pdf-next").disabled = true;
+  try {
+    const lib = await loadPdfjs();
+    const res = await fetch(imgUrl(currentFolder, file));
+    if (!res.ok) throw new Error(res.statusText);
+    const doc = await lib.getDocument({ data: await res.arrayBuffer() }).promise;
+    if (token !== viewToken) { doc.destroy(); return; }
+    pdf = { doc, page: 1 };
+    await renderPdfPage();
+  } catch (e) {
+    if (token !== viewToken) return;
+    // Ohne PDF.js (kein Netz beim ersten Mal, sehr alter Browser): Ansicht des Browsers.
+    document.body.classList.add("pdf-native");
+    $("pdf-frame").src = imgUrl(currentFolder, file) + "#view=Fit";
+    $("pdf-counter").textContent = "PDF";
+    $("pdf-note").textContent = "Blättern in der Ansicht links";
+    $("pdf-note").title = "PDF.js konnte nicht geladen werden (" + e.message + "). " +
+      "Zoomen, Drehen und Bild ↑/↓ gehen nur dort.";
+  }
+}
+
+async function renderPdfPage() {
+  const token = viewToken, p = pdf;
+  const n = p.doc.numPages;
+  $("pdf-counter").textContent = `Seite ${p.page} von ${n}`;
+  $("pdf-prev").disabled = p.page <= 1;
+  $("pdf-next").disabled = p.page >= n;
+  const page = await p.doc.getPage(p.page);
+  // Dreimal so groß wie das Fenster, damit es auch vergrößert scharf bleibt.
+  const v = $("viewer"), base = page.getViewport({ scale: 1 });
+  const px = Math.min(4096, 3 * Math.max(v.clientWidth, v.clientHeight) * (window.devicePixelRatio || 1));
+  const viewport = page.getViewport({ scale: px / Math.max(base.width, base.height) });
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.floor(viewport.width);
+  canvas.height = Math.floor(viewport.height);
+  await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+  page.cleanup();
+  if (token !== viewToken || pdf !== p) return;
+  const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", 0.92));
+  if (token !== viewToken || pdf !== p || !blob) return;
+  setImageSrc(URL.createObjectURL(blob));
+}
+
+function pdfPage(dir) {
+  if (!pdf) return;
+  const page = Math.min(pdf.doc.numPages, Math.max(1, pdf.page + dir));
+  if (page === pdf.page) return;
+  pdf.page = page;
+  viewToken++;
+  resetView(false);                            // Drehung bleibt für alle Seiten
+  renderPdfPage().catch(e => setStatus("Fehler: " + e.message, true));
 }
 
 function navigate(dir) {
@@ -1597,6 +1757,7 @@ function rotateView() {
     zoomAt(3, ...fromCentre(e));
   });
   window.addEventListener("resize", applyView);
+  img.addEventListener("load", applyView);     // gedrehtes Bild an das neue Format anpassen
 })();
 
 // ---- Tastatur ----
@@ -1604,7 +1765,7 @@ function anyOverlay() { return document.querySelector(".overlay.open"); }
 
 // Klicks auf Knöpfe und ins Bild nehmen dem Datumsfeld nicht den Fokus – man kann sofort weitertippen.
 document.addEventListener("mousedown", e => {
-  if (e.target.closest("#panel button, #viewer")) e.preventDefault();
+  if (e.target.closest("#panel button, #viewer, #pdf-row")) e.preventDefault();
 });
 
 document.addEventListener("keydown", e => {
@@ -1630,6 +1791,9 @@ document.addEventListener("keydown", e => {
   } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
     e.preventDefault();
     navigate(e.key === "ArrowDown" ? 1 : -1);
+  } else if (e.key === "PageDown" || e.key === "PageUp") {
+    e.preventDefault();
+    pdfPage(e.key === "PageDown" ? 1 : -1);
   } else if (inPerson) {
     return;                                      // dort gehören Buchstaben und ←/→ zum Text
   } else if (!inDate && (e.key === "ArrowRight" || e.key === "ArrowLeft")) {

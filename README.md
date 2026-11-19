@@ -30,15 +30,19 @@ Es muss nichts weiter installiert werden.
 
 1. Repository herunterladen: oben auf **Code → Download ZIP** klicken und entpacken.
 2. Doppelklick auf
-   - **`start.command`** (macOS, Linux) bzw.
-   - **`start.bat`** (Windows).
+   - **`start-mac.command`** (macOS, auch Linux) bzw.
+   - **`start-win.bat`** (Windows).
 3. Im Browser öffnet sich das Tool und fragt, wo die Bilder liegen.
 
 Zum Beenden einfach den Browser-Tab schließen.
 
-> **macOS** weigert sich beim ersten Mal eventuell, die heruntergeladene Datei zu
-> öffnen. Dann entweder Rechtsklick auf `start.command` → **Öffnen** oder unter
-> *Systemeinstellungen → Datenschutz & Sicherheit* auf **Dennoch öffnen** klicken.
+> **macOS** blockiert `start-mac.command` beim ersten Mal, weil die Datei aus dem
+> Internet kommt und nicht bei Apple registriert ist. Einmal unter
+> *Systemeinstellungen → Datenschutz & Sicherheit* auf **Dennoch öffnen** klicken
+> (Rechtsklick → *Öffnen* genügt seit macOS 15 nicht mehr). Schritt für Schritt
+> steht das in **[`macOS-erster-Start.txt`](macOS-erster-Start.txt)**, auch der
+> schnellere Weg über das Terminal. Beim ersten Start entfernt das Tool die Sperre
+> für seinen ganzen Ordner; danach genügt der Doppelklick.
 > Fehlt Python, bietet macOS in der Regel an, es nachzuinstallieren (»Command Line
 > Developer Tools«); andernfalls von python.org laden.
 
@@ -72,7 +76,7 @@ Anklicken angeboten, ein kopierter Pfad lässt sich oben einfügen. Später wech
 man den Ordner links oben über **wechseln…**.
 
 Links erscheinen alle Ordner, in denen noch unbenannte Bilder liegen
-(`jpg`, `png`, `tif`, `gif`, `webp`). Bereits benannte und als *sonstiges*
+(`jpg`, `png`, `tif`, `gif`, `webp` und `pdf`). Bereits benannte und als *sonstiges*
 abgelegte Bilder werden nicht mehr angezeigt; man kann die Arbeit also jederzeit unterbrechen und später fortsetzen.
 
 ## Arbeiten
@@ -215,6 +219,23 @@ drehen die Ansicht. Außerdem:
 - **«** klappt die Ordnerliste ein, wenn das Bild mehr Platz braucht.
 - **im Finder zeigen** (Windows: Explorer) öffnet den aktuellen Ordner.
 
+### PDF
+
+PDFs werden wie Bilder behandelt: Die ganze Datei bekommt einen Namen
+(`d1899-12-31_s2121_e10815_p1.pdf`); liegt ein mehrseitiger Brief in einem PDF,
+ist das also ein Umbenennen für alle Seiten.
+
+Unter der Bild-Zeile erscheint bei PDFs **Seite 1 von 3** mit eigenen Pfeilen
+zum Blättern; über die Tastatur blättert **Bild ↓** / **Bild ↑** (am Mac
+**fn ↓** / **fn ↑**). Zoomen, Verschieben und Drehen funktionieren wie bei
+Bildern, die Drehung bleibt beim Blättern erhalten.
+
+Angezeigt werden PDFs mit [PDF.js](https://mozilla.github.io/pdf.js/). Das lädt
+das Tool beim ersten PDF einmal aus dem Netz (cdnjs), prüft es und legt es unter
+`~/.dating-correspondences-pdfjs` ab; danach geht es auch ohne Netz. Klappt das
+nicht, zeigt der Browser das PDF mit seiner eigenen Ansicht. Dort wird dann in
+der Ansicht selbst geblättert und gezoomt.
+
 ### Unbeschnittenes Original
 
 Der Knopf **Unbeschnittenes Original verwenden** erscheint nur, wenn im gewählten
@@ -241,8 +262,9 @@ PMB_API = "https://pmb.acdh.oeaw.ac.at/…/person/{id}/…"   # "" schaltet die 
 ## Gut zu wissen
 
 - Das Tool läuft nur auf dem eigenen Rechner (`http://localhost:5050`). Ins Netz
-  geht einzig die Namensabfrage bei der PMB, und dabei nur die Personennummer –
-  keine Bilder, keine Dateinamen. Die Nummern aus `QUICK_IDS` (Schnitzler, 2121)
+  geht nur die Namensabfrage bei der PMB, und dabei nur die Personennummer –
+  keine Bilder, keine Dateinamen –, sowie einmalig der Download von PDF.js beim
+  ersten PDF. Die Nummern aus `QUICK_IDS` (Schnitzler, 2121)
   werden nie abgefragt.
 - Bilder werden ausschließlich **umbenannt** und bleiben in ihrem Ordner. Gelöscht
   wird nur beim Ersetzen durch das unbeschnittene Original – der Ausschnitt.
